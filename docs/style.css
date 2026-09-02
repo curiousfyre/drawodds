@@ -435,6 +435,48 @@ footer p { margin: 0.25rem 0; }
   margin: 0;
 }
 
+.strategy-combined {
+  background: var(--accent-light);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 0.75rem 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.strategy-combined h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.strategy-combined ul {
+  margin: 0.25rem 0 0.5rem;
+  padding-left: 1.5rem;
+  font-size: 0.85rem;
+}
+
+.strategy-combined li { margin: 0.15rem 0; }
+
+.combined-odds {
+  font-size: 0.95rem;
+  margin: 0.5rem 0 0;
+}
+
+.strategy-notes {
+  font-size: 0.8rem;
+  color: #888;
+  padding: 0.5rem 0;
+}
+
+.strategy-notes p { margin: 0.2rem 0; }
+
+.low-sample {
+  color: var(--odds-mid);
+  font-weight: 700;
+  cursor: help;
+}
+
 /* ---- Loading state ---- */
 
 #results-table tbody .loading-row td {

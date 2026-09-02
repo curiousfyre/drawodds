@@ -23,6 +23,7 @@ Notes:
 
 import argparse
 import csv
+import math
 import re
 import sys
 from collections import defaultdict
@@ -135,10 +136,17 @@ _COL_2023_PLUS = ColConfig(
 
 YEAR_CONFIGS: Dict[int, ColConfig] = {
     2022: _COL_2022,
-    2023: _COL_2023_PLUS,
-    2024: _COL_2023_PLUS,
-    2025: _COL_2023_PLUS,
 }
+
+_YEAR_2023_PLUS_LAYOUT = _COL_2023_PLUS
+
+
+def get_col_config(year: int) -> Optional[ColConfig]:
+    if year in YEAR_CONFIGS:
+        return YEAR_CONFIGS[year]
+    if year >= 2023:
+        return _YEAR_2023_PLUS_LAYOUT
+    return None
 
 # NMDGF renamed "ANTELOPE" to "PRONGHORN" starting in 2023.
 SPECIES_NORMALIZE = {
@@ -272,7 +280,7 @@ class HuntRecord:
 
         if apps <= 0:
             return None
-        return min(round(drawn / apps * 100, 1), 100.0)
+        return min(_round1(drawn / apps * 100), 100.0)
 
 
 @dataclass
@@ -322,6 +330,11 @@ def _float(row: list, col: int) -> float:
         return 0.0
 
 
+def _round1(val: float) -> float:
+    """Round to 1 decimal using standard half-up rounding (matches JavaScript)."""
+    return math.floor(val * 10 + 0.5) / 10
+
+
 def _species_from_row(row: list) -> Optional[str]:
     """
     If row[0] is a species section header, return the normalized species name.
@@ -345,7 +358,7 @@ def _parse_units(unit_desc: str) -> List[str]:
 
 def parse_xlsx(filepath: Path, year: int) -> List[HuntRecord]:
     """Parse one NMDGF drawing odds report and return HuntRecord objects."""
-    cfg = YEAR_CONFIGS.get(year)
+    cfg = get_col_config(year)
     if cfg is None:
         return []
 
@@ -429,7 +442,7 @@ def load_reports(
         if not m:
             continue
         year = int(m.group(1))
-        if year == 2021 or year not in YEAR_CONFIGS:
+        if year == 2021 or get_col_config(year) is None:
             continue
         if year_filter and year not in year_filter:
             continue
@@ -477,7 +490,7 @@ def aggregate(records: List[HuntRecord], hunter_type: str) -> List[AggregatedHun
 
         all_odds = [r.draw_odds(hunter_type) for r in recs]
         valid_odds = [o for o in all_odds if o is not None]
-        avg_odds = round(sum(valid_odds) / len(valid_odds), 1) if valid_odds else None
+        avg_odds = _round1(sum(valid_odds) / len(valid_odds)) if valid_odds else None
 
         if hunter_type == "resident":
             latest_apps     = latest.res_1st
@@ -692,6 +705,29 @@ def filter_restricted(records: List[HuntRecord], include: bool) -> List[HuntReco
     return [r for r in records if not is_restricted(r.unit_desc)]
 
 
+def _type_licenses(r: HuntRecord, hunter_type: str) -> int:
+    if hunter_type == "resident":
+        return round(r.licenses * r.r_pct / 100)
+    elif hunter_type == "nonresident":
+        return round(r.licenses * r.nr_pct / 100)
+    elif hunter_type == "outfitter":
+        return round(r.licenses * r.o_pct / 100)
+    return r.licenses
+
+
+def _type_apps(r: HuntRecord, hunter_type: str, choice: int) -> int:
+    if hunter_type == "resident":
+        return [r.res_1st, r.res_2nd, r.res_3rd][choice - 1]
+    elif hunter_type == "nonresident":
+        return [r.nr_1st, r.nr_2nd, r.nr_3rd][choice - 1]
+    elif hunter_type == "outfitter":
+        return [r.out_1st, r.out_2nd, r.out_3rd][choice - 1]
+    return [r.total_1st, r.total_2nd, r.total_3rd][choice - 1]
+
+
+_MIN_APPS = 10
+
+
 def display_strategy(
     records: List[HuntRecord],
     hunt_type_name: str,
@@ -701,7 +737,6 @@ def display_strategy(
     top: int,
 ) -> None:
     """Show the top N hunts per choice tier to maximize draw odds."""
-    # Get the latest year for each hunt code
     latest: Dict[str, HuntRecord] = {}
     for r in records:
         if r.hunt_code not in latest or r.year > latest[r.hunt_code].year:
@@ -715,27 +750,26 @@ def display_strategy(
     year = max(r.year for r in recs)
     bag_label = ", ".join(bags)
     type_label = hunter_type.title()
+    type_abbr = {"resident": "Res", "nonresident": "NR", "outfitter": "Out", "total": "Tot"}
+    lic_label = f"{type_abbr.get(hunter_type, 'Tot')} Lic"
 
     print(f"\n{'═' * 70}")
     print(f"  DRAW STRATEGY: {hunt_type_name.title()}")
     print(f"  {species.title()} (bag: {bag_label}) | {type_label} | {year}")
     print(f"{'═' * 70}")
 
+    best_per_tier: Dict[int, tuple] = {}
+    used_codes: set = set()
+    has_low_sample = False
+
     for choice, choice_label in [(1, "1st"), (2, "2nd"), (3, "3rd")]:
-        # Build (hunt_code, odds, record) tuples
         ranked = []
         for r in recs:
             odds = r.draw_odds(hunter_type, choice)
             if odds is not None and odds > 0:
-                if hunter_type == "resident":
-                    apps = [r.res_1st, r.res_2nd, r.res_3rd][choice - 1]
-                elif hunter_type == "nonresident":
-                    apps = [r.nr_1st, r.nr_2nd, r.nr_3rd][choice - 1]
-                elif hunter_type == "outfitter":
-                    apps = [r.out_1st, r.out_2nd, r.out_3rd][choice - 1]
-                else:
-                    apps = [r.total_1st, r.total_2nd, r.total_3rd][choice - 1]
-                ranked.append((odds, apps, r))
+                apps = _type_apps(r, hunter_type, choice)
+                type_lic = _type_licenses(r, hunter_type)
+                ranked.append((odds, apps, r, type_lic))
 
         ranked.sort(key=lambda x: x[0], reverse=True)
         shown = ranked[:top]
@@ -746,17 +780,21 @@ def display_strategy(
             print("  No hunts with draws in this tier.")
             continue
 
-        headers = ["#", "Hunt Code", "Unit / Description", "Bag", "Licenses", "Apps", "Draw %"]
+        headers = ["#", "Hunt Code", "Unit / Description", "Bag", lic_label, "Apps", "Draw %"]
         rows = []
-        for i, (odds, apps, r) in enumerate(shown, 1):
+        for i, (odds, apps, r, type_lic) in enumerate(shown, 1):
+            low_sample = apps < _MIN_APPS
+            if low_sample:
+                has_low_sample = True
+            odds_str = f"{odds:.1f}%{'†' if low_sample else ''}"
             rows.append([
                 i,
                 r.hunt_code,
                 r.unit_desc[:38],
                 r.bag,
-                r.licenses,
+                type_lic if type_lic > 0 else "—",
                 apps,
-                f"{odds:.1f}%",
+                odds_str,
             ])
 
         if HAS_TABULATE:
@@ -769,6 +807,30 @@ def display_strategy(
             for row in rows:
                 print(f"  {fmt.format(*[str(x) for x in row])}")
 
+        for odds, apps, r, _ in ranked:
+            if r.hunt_code not in used_codes:
+                best_per_tier[choice] = (odds, apps, r)
+                used_codes.add(r.hunt_code)
+                break
+
+    if best_per_tier:
+        print(f"\n  ── Combined Draw Estimate ──")
+        print(f"  Best distinct hunt per choice:")
+        p_miss = 1.0
+        for choice in [1, 2, 3]:
+            if choice in best_per_tier:
+                odds, apps, r = best_per_tier[choice]
+                ordinal = ["1st", "2nd", "3rd"][choice - 1]
+                low = "†" if apps < _MIN_APPS else ""
+                print(f"    {ordinal}: {r.hunt_code} ({odds:.1f}%{low})")
+                p_miss *= (1 - odds / 100)
+        combined = _round1((1 - p_miss) * 100)
+        print(f"  Estimated chance of drawing a tag: {combined:.1f}%")
+
+    if has_low_sample:
+        print(f"\n  † Less than {_MIN_APPS} applicants — odds less reliable")
+    print(f"\n  Note: 2nd/3rd choice odds are historical averages, not conditional")
+    print(f"  on your specific application. Combined estimate is approximate.")
     print(f"\n  Tip: Combine with --unit to narrow by GMU (e.g. --unit 34)")
     print(f"       Use --year all to see multi-year trends")
     print()
@@ -778,7 +840,7 @@ def display_strategy(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="NM Big Game Draw Odds Analyzer (2022-2025 reports)",
+        description="NM Big Game Draw Odds Analyzer (2022+ reports)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -798,8 +860,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--year", "-y",
-        default="2025",
-        help="Report year(s) to include: 2022-2025, comma-separated, or 'all' (default: 2025)",
+        default="latest",
+        help="Report year(s): comma-separated years, 'all', or 'latest' (default: latest)",
     )
     parser.add_argument(
         "--sort",
@@ -854,13 +916,14 @@ def main() -> None:
     if not args.list_species and not args.species and not args.unit and not args.strategy:
         parser.error("Provide --species, --unit, --strategy, or --list-species / --list-types")
 
-    # Parse year filter
+    # Parse year filter — "latest" loads all then keeps only the max year
     year_filter: Optional[List[int]] = None
-    if args.year != "all":
+    use_latest = args.year == "latest"
+    if args.year not in ("all", "latest"):
         try:
             year_filter = [int(y.strip()) for y in args.year.split(",")]
         except ValueError:
-            parser.error(f"Invalid --year value: {args.year!r}. Use e.g. 2025 or 2023,2024")
+            parser.error(f"Invalid --year value: {args.year!r}. Use e.g. 2025, 2023,2024, 'all', or 'latest'")
 
     # Load reports
     print(f"\nLoading reports from {args.data_dir} ...", file=sys.stderr)
@@ -868,6 +931,10 @@ def main() -> None:
     if not records:
         print("ERROR: No records loaded. Check --data-dir or year filter.", file=sys.stderr)
         sys.exit(1)
+
+    if use_latest:
+        latest_year = max(r.year for r in records)
+        records = [r for r in records if r.year == latest_year]
 
     available_years = sorted({r.year for r in records})
     print(f"  Years: {available_years} | Total hunt records: {len(records)}", file=sys.stderr)

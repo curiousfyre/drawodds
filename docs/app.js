@@ -314,11 +314,26 @@ function populateStrategySelect() {
   }
 }
 
+const MIN_APPS = 10;
+
+function typeLicenses(rec, hunterType) {
+  if (hunterType === 'resident') return Math.round(rec.licenses * rec.r_pct / 100);
+  if (hunterType === 'nonresident') return Math.round(rec.licenses * rec.nr_pct / 100);
+  if (hunterType === 'outfitter') return Math.round(rec.licenses * rec.o_pct / 100);
+  return rec.licenses;
+}
+
+function typeApps(rec, hunterType, choice) {
+  if (hunterType === 'resident') return [rec.res_1st, rec.res_2nd, rec.res_3rd][choice - 1];
+  if (hunterType === 'nonresident') return [rec.nr_1st, rec.nr_2nd, rec.nr_3rd][choice - 1];
+  if (hunterType === 'outfitter') return [rec.out_1st, rec.out_2nd, rec.out_3rd][choice - 1];
+  return [rec.total_1st, rec.total_2nd, rec.total_3rd][choice - 1];
+}
+
 function renderStrategy(records, huntTypeName, hunterType) {
   const cfg = HUNT_TYPES[huntTypeName];
   if (!cfg) return;
 
-  // Get latest year per hunt code
   const latest = {};
   for (const r of records) {
     if (!latest[r.hunt_code] || r.year > latest[r.hunt_code].year) {
@@ -334,6 +349,8 @@ function renderStrategy(records, huntTypeName, hunterType) {
 
   const year = Math.max(...recs.map(r => r.year));
   const typeAbbr = { resident: 'Resident', nonresident: 'Nonresident', outfitter: 'Outfitter', total: 'All' };
+  const licAbbr = { resident: 'Res', nonresident: 'NR', outfitter: 'Out', total: 'Tot' };
+  const licLabel = (licAbbr[hunterType] || 'Tot') + ' Lic';
   const bagLabel = cfg.bags.join(', ');
 
   let html = '<div class="strategy-header">' +
@@ -341,18 +358,19 @@ function renderStrategy(records, huntTypeName, hunterType) {
     '<p>' + titleCase(cfg.species) + ' (bag: ' + escHtml(bagLabel) + ') &middot; ' +
     (typeAbbr[hunterType] || 'All') + ' &middot; ' + year + '</p></div>';
 
+  const bestPerTier = {};
+  const usedCodes = new Set();
+  let hasLowSample = false;
+
   const choices = [[1, '1st'], [2, '2nd'], [3, '3rd']];
   for (const [choice, label] of choices) {
     const ranked = [];
     for (const r of recs) {
       const odds = drawOdds(r, hunterType, choice);
       if (odds !== null && odds > 0) {
-        let apps;
-        if (hunterType === 'resident') apps = [r.res_1st, r.res_2nd, r.res_3rd][choice - 1];
-        else if (hunterType === 'nonresident') apps = [r.nr_1st, r.nr_2nd, r.nr_3rd][choice - 1];
-        else if (hunterType === 'outfitter') apps = [r.out_1st, r.out_2nd, r.out_3rd][choice - 1];
-        else apps = [r.total_1st, r.total_2nd, r.total_3rd][choice - 1];
-        ranked.push({ odds, apps, rec: r });
+        const apps = typeApps(r, hunterType, choice);
+        const tl = typeLicenses(r, hunterType);
+        ranked.push({ odds, apps, rec: r, typeLic: tl });
       }
     }
     ranked.sort((a, b) => b.odds - a.odds);
@@ -365,24 +383,61 @@ function renderStrategy(records, huntTypeName, hunterType) {
     } else {
       html += '<table class="strategy-table"><thead><tr>' +
         '<th>#</th><th>Hunt Code</th><th>Unit / Description</th>' +
-        '<th>Bag</th><th>Licenses</th><th>Apps</th><th>Draw %</th>' +
+        '<th>Bag</th><th>' + escHtml(licLabel) + '</th><th>Apps</th><th>Draw %</th>' +
         '</tr></thead><tbody>';
       for (let i = 0; i < shown.length; i++) {
         const s = shown[i];
+        const lowSample = s.apps < MIN_APPS;
+        if (lowSample) hasLowSample = true;
+        const oddsStr = s.odds.toFixed(1) + '%' + (lowSample ? '<span class="low-sample" title="Less than ' + MIN_APPS + ' applicants — odds less reliable">†</span>' : '');
         html += '<tr>' +
           '<td>' + (i + 1) + '</td>' +
           '<td class="mono">' + escHtml(s.rec.hunt_code) + '</td>' +
           '<td><span class="unit-desc" title="' + escAttr(s.rec.unit_desc) + '">' + escHtml(s.rec.unit_desc) + '</span></td>' +
           '<td>' + escHtml(s.rec.bag) + '</td>' +
-          '<td>' + s.rec.licenses + '</td>' +
+          '<td>' + (s.typeLic > 0 ? s.typeLic : '—') + '</td>' +
           '<td>' + s.apps + '</td>' +
-          '<td class="odds ' + oddsClass(s.odds) + '">' + s.odds.toFixed(1) + '%</td>' +
+          '<td class="odds ' + oddsClass(s.odds) + '">' + oddsStr + '</td>' +
           '</tr>';
       }
       html += '</tbody></table>';
     }
     html += '</div>';
+
+    for (const entry of ranked) {
+      if (!usedCodes.has(entry.rec.hunt_code)) {
+        bestPerTier[choice] = entry;
+        usedCodes.add(entry.rec.hunt_code);
+        break;
+      }
+    }
   }
+
+  if (Object.keys(bestPerTier).length > 0) {
+    let pMiss = 1.0;
+    html += '<div class="strategy-combined"><h3>Combined Draw Estimate</h3>';
+    html += '<p>Best distinct hunt per choice:</p><ul>';
+    for (const choice of [1, 2, 3]) {
+      if (bestPerTier[choice]) {
+        const { odds, apps, rec } = bestPerTier[choice];
+        const ordinal = ['1st', '2nd', '3rd'][choice - 1];
+        const low = apps < MIN_APPS ? '<span class="low-sample">†</span>' : '';
+        html += '<li>' + ordinal + ': <span class="mono">' + escHtml(rec.hunt_code) + '</span> (' + odds.toFixed(1) + '%' + low + ')</li>';
+        pMiss *= (1 - odds / 100);
+      }
+    }
+    const combined = Math.round((1 - pMiss) * 1000) / 10;
+    html += '</ul>';
+    html += '<p class="combined-odds">Estimated chance of drawing a tag: <strong class="odds ' + oddsClass(combined) + '">' + combined.toFixed(1) + '%</strong></p>';
+    html += '</div>';
+  }
+
+  html += '<div class="strategy-notes">';
+  if (hasLowSample) {
+    html += '<p>† Less than ' + MIN_APPS + ' applicants — odds less reliable.</p>';
+  }
+  html += '<p>2nd/3rd choice odds are historical averages, not conditional on your specific application. Combined estimate is approximate.</p>';
+  html += '</div>';
 
   document.getElementById('strategy-results').innerHTML = html;
 }
